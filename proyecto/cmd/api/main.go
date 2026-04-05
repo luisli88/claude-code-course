@@ -46,7 +46,11 @@ func main() {
 	register := usecase.NewRegister(userRepo)
 	authHandler := handler.NewAuthHandler(login, register)
 
-	r := router.New(userHandler, authHandler)
+	productRepo := persistence.NewPostgresProductRepo(db)
+	createProduct := usecase.NewCreateProduct(productRepo)
+	productHandler := handler.NewProductHandler(createProduct)
+
+	r := router.New(userHandler, authHandler, productHandler)
 
 	log.Println("Server running on :8080")
 	log.Fatal(http.ListenAndServe(":8080", r))
