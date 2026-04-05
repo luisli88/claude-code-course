@@ -1,0 +1,33 @@
+# === BUILDS & ARTIFACTS ===
+# Justificación: Archivos generados, no fuente
+node_modules/
+dist/
+build/
+.next/
+coverage/
+
+# === LOCKFILES ===
+# Justificación: Claude no necesita ver deps resueltas
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# === ASSETS BINARIOS ===
+# Justificación: Claude no puede leer imágenes/videos
+*.jpg
+*.png
+*.gif
+*.mp4
+*.mp3
+*.woff
+
+# === LOGS Y TEMPORALES ===
+*.log
+.DS_Store
+*.tmp
+
+# === CÓDIGO GENERADO ===
+# Justificación: Generado automáticamente por tooling
+*.generated.ts
+*_pb.js
+__snapshots__/

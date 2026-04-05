@@ -1,0 +1,14 @@
+package router
+
+import (
+	"net/http"
+
+	"myapp/internal/presentation/handler"
+)
+
+func New(userHandler *handler.UserHandler, authHandler *handler.AuthHandler) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /users", userHandler.List)
+	mux.HandleFunc("POST /login", authHandler.Login)
+	return mux
+}
