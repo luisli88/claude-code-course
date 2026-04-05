@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-This is a Go REST API course project (`proyecto/`) demonstrating Clean Architecture with a single `GET /users` endpoint backed by PostgreSQL.
+This is a Go REST API course project (`proyecto/`) demonstrating Clean Architecture with a `GET /users`, `POST /login`, and `POST /register` endpoints backed by PostgreSQL.
 
 - Module: `myapp`
-- Single external dependency: `github.com/lib/pq` (Postgres driver)
+- External dependencies: `github.com/lib/pq` (Postgres driver), `github.com/golang-jwt/jwt/v5`, `golang.org/x/crypto`
 - No frameworks: stdlib `net/http` + `database/sql` only
 
 ## Commands
@@ -54,3 +54,31 @@ The mock for `UserRepository` lives in `internal/domain/repository/mock_user_rep
 ## Migrations
 
 SQL files in `migrations/` run automatically via Postgres's `/docker-entrypoint-initdb.d` on container creation. To re-run: `make down-clean && make up`.
+
+## Implemented features
+
+### POST /register
+
+Full Clean Architecture implementation of user registration. Touch points per layer:
+
+**Domain**
+- `user_repository.go`: Added `ErrNotFound` sentinel and `Create(entity.User) (*entity.User, error)` to `UserRepository` interface.
+- `mock_user_repository.go`: Implements `Create` (appends with mock ID and timestamp); `FindByEmail` now returns `ErrNotFound` instead of a raw untyped error.
+
+**Application**
+- `usecase/register.go`: `Register` use case with input validation, email uniqueness check, bcrypt hashing, and repo delegation.
+  - Sentinel errors exported: `ErrInvalidInput`, `ErrEmailAlreadyTaken`.
+  - Validation rules: name non-empty, email contains `@`, password ≥ 8 characters.
+  - Email uniqueness: calls `FindByEmail`; if `ErrNotFound` → email is free; if `nil` error → email taken.
+- `usecase/register_test.go`: Unit tests — success path, duplicate email, all three validation failures, repo error propagation on `Create`.
+
+**Infrastructure**
+- `persistence/postgres_user_repo.go`: `Create` uses `INSERT … RETURNING` so the DB generates `id` and `created_at`; `FindByEmail` maps `sql.ErrNoRows` → `repository.ErrNotFound`.
+- `persistence/postgres_user_repo_integration_test.go`: Tests for `Create` success, duplicate email error, and `FindByEmail` returning `ErrNotFound`.
+
+**Presentation**
+- `dto/register_request.go`: `{ name, email, password }`.
+- `dto/register_response.go`: `{ id, name, email, created_at }`.
+- `handler/auth_handler.go`: `Register` method — `201 Created` on success, `400` for validation errors, `409 Conflict` for duplicate email, `500` otherwise. `NewAuthHandler` now accepts `*usecase.Register` as second argument.
+- `router/router.go`: `POST /register` route added.
+- `cmd/api/main.go`: `Register` use case wired at composition root.

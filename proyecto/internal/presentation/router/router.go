@@ -10,5 +10,6 @@ func New(userHandler *handler.UserHandler, authHandler *handler.AuthHandler) htt
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /users", userHandler.List)
 	mux.HandleFunc("POST /login", authHandler.Login)
+	mux.HandleFunc("POST /register", authHandler.Register)
 	return mux
 }

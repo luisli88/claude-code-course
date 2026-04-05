@@ -1,8 +1,9 @@
 package repository
 
 import (
-	"errors"
+	"fmt"
 	"myapp/internal/domain/entity"
+	"time"
 )
 
 type MockUserRepository struct {
@@ -44,5 +45,15 @@ func (m *MockUserRepository) FindByEmail(email string) (*entity.User, error) {
 			return &u, nil
 		}
 	}
-	return nil, errors.New("user not found")
+	return nil, ErrNotFound
+}
+
+func (m *MockUserRepository) Create(user entity.User) (*entity.User, error) {
+	if m.Err != nil {
+		return nil, m.Err
+	}
+	user.ID = fmt.Sprintf("mock-id-%d", len(m.Users)+1)
+	user.CreatedAt = time.Now()
+	m.Users = append(m.Users, user)
+	return &user, nil
 }

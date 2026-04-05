@@ -1,4 +1,4 @@
-# Arquitectura: Endpoint GET /users
+# Arquitectura: API REST con Clean Architecture
 
 ## Patron: Clean Architecture (capas concentricas)
 
@@ -12,7 +12,8 @@
 ├── .env                         # Variables de entorno local (excluido de git)
 ├── .gitignore
 ├── migrations/
-│   └── 001_create_users.sql     # Schema inicial + datos de prueba
+│   ├── 001_create_users.sql     # Schema inicial + datos de prueba
+│   └── 002_add_password_hash.sql # Columna password_hash
 │
 ├── cmd/
 │   └── api/
@@ -22,22 +23,41 @@
     ├── domain/                  # Capa de dominio (sin dependencias externas)
     │   ├── entity/
     │   │   └── user.go          # Entidad de negocio
-    │   └── repository/
-    │       └── user_repository.go # Interfaz (port)
+    │   ├── repository/
+    │   │   ├── user_repository.go      # Interfaz (port) + ErrNotFound
+    │   │   └── mock_user_repository.go # Mock manual reutilizable
+    │   └── service/
+    │       └── token_service.go        # Interfaz TokenService
     │
     ├── application/             # Casos de uso (orquestacion)
     │   └── usecase/
-    │       └── list_users.go    # Caso de uso: listar usuarios
+    │       ├── list_users.go    # Caso de uso: listar usuarios (paginado)
+    │       ├── list_users_test.go
+    │       ├── login.go         # Caso de uso: autenticar usuario
+    │       ├── register.go      # Caso de uso: registrar usuario
+    │       └── register_test.go
     │
     ├── infrastructure/          # Implementaciones concretas (adapters)
+    │   ├── auth/
+    │   │   └── jwt_token_service.go    # Implementacion JWT de TokenService
     │   └── persistence/
-    │       └── postgres_user_repo.go
+    │       ├── postgres_user_repo.go
+    │       ├── postgres_user_repo_integration_test.go
+    │       └── testhelper/
+    │           └── db.go               # Conexion + seed para tests
     │
     └── presentation/            # Capa HTTP (handler + routing)
         ├── handler/
-        │   └── user_handler.go
+        │   ├── user_handler.go
+        │   ├── user_handler_test.go
+        │   └── auth_handler.go         # Login + Register
         ├── dto/
-        │   └── user_response.go
+        │   ├── user_response.go
+        │   ├── user_response_test.go
+        │   ├── login_request.go
+        │   ├── login_response.go
+        │   ├── register_request.go     # { name, email, password }
+        │   └── register_response.go   # { id, name, email, created_at }
         └── router/
             └── router.go
 ```
@@ -49,6 +69,14 @@ Request -> Router -> Handler -> UseCase -> Repository (interfaz)
                                                |
                                      PostgresUserRepo (implementacion)
 ```
+
+**Endpoints disponibles**
+
+| Metodo | Ruta        | Handler               | Caso de uso   |
+| ------ | ----------- | --------------------- | ------------- |
+| GET    | /users      | UserHandler.List      | ListUsers     |
+| POST   | /login      | AuthHandler.Login     | Login         |
+| POST   | /register   | AuthHandler.Register  | Register      |
 
 ---
 
@@ -63,10 +91,11 @@ package entity
 import "time"
 
 type User struct {
-    ID        string    `json:"id"`
-    Name      string    `json:"name"`
-    Email     string    `json:"email"`
-    CreatedAt time.Time `json:"created_at"`
+    ID           string    `json:"id"`
+    Name         string    `json:"name"`
+    Email        string    `json:"email"`
+    CreatedAt    time.Time `json:"created_at"`
+    PasswordHash string    `json:"-"`
 }
 ```
 
@@ -74,7 +103,12 @@ type User struct {
 // internal/domain/repository/user_repository.go
 package repository
 
-import "myapp/internal/domain/entity"
+import (
+    "errors"
+    "myapp/internal/domain/entity"
+)
+
+var ErrNotFound = errors.New("not found")
 
 type PaginationParams struct {
     Limit  int
@@ -84,10 +118,14 @@ type PaginationParams struct {
 type UserRepository interface {
     FindAll(params PaginationParams) ([]entity.User, error)
     Count() (int, error)
+    FindByEmail(email string) (*entity.User, error)  // devuelve ErrNotFound si no existe
+    Create(user entity.User) (*entity.User, error)   // DB genera id y created_at
 }
 ```
 
-### 2. Application - Caso de uso
+El sentinel `ErrNotFound` permite que los casos de uso distingan "no encontrado" de otros errores de base de datos, sin acoplarse a `database/sql`.
+
+### 2. Application - Casos de uso
 
 ```go
 // internal/application/usecase/list_users.go
@@ -143,6 +181,78 @@ func (uc *ListUsers) Execute(input ListUsersInput) (*ListUsersOutput, error) {
 }
 ```
 
+**Caso de uso: Register** — registrar un nuevo usuario
+
+```go
+// internal/application/usecase/register.go
+package usecase
+
+var (
+    ErrEmailAlreadyTaken = errors.New("email already taken")
+    ErrInvalidInput      = errors.New("invalid input")
+)
+
+type RegisterInput struct {
+    Name     string
+    Email    string
+    Password string
+}
+
+type RegisterOutput struct {
+    User entity.User
+}
+
+type Register struct {
+    repo repository.UserRepository
+}
+
+func NewRegister(repo repository.UserRepository) *Register {
+    return &Register{repo: repo}
+}
+
+func (uc *Register) Execute(input RegisterInput) (*RegisterOutput, error) {
+    // 1. Validacion de entrada
+    if err := validateRegisterInput(input); err != nil {
+        return nil, err  // ErrInvalidInput wrapeado con mensaje especifico
+    }
+
+    // 2. Verificar unicidad del email
+    _, err := uc.repo.FindByEmail(input.Email)
+    if err == nil {
+        return nil, ErrEmailAlreadyTaken
+    }
+    if !errors.Is(err, repository.ErrNotFound) {
+        return nil, err  // error de infraestructura, propagar
+    }
+
+    // 3. Hashear contrasena
+    hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+    if err != nil {
+        return nil, err
+    }
+
+    // 4. Persistir
+    created, err := uc.repo.Create(entity.User{
+        Name:         input.Name,
+        Email:        input.Email,
+        PasswordHash: string(hash),
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    return &RegisterOutput{User: *created}, nil
+}
+```
+
+**Reglas de validacion** (funcion privada `validateRegisterInput`):
+
+| Campo    | Regla                          | Error                                          |
+| -------- | ------------------------------ | ---------------------------------------------- |
+| name     | no vacio (despues de TrimSpace)| `invalid input: name is required`              |
+| email    | contiene `@` y no es vacio     | `invalid input: email is invalid`              |
+| password | longitud ≥ 8                   | `invalid input: password must be at least 8 characters` |
+
 ### 3. Infrastructure - Implementacion concreta
 
 ```go
@@ -189,7 +299,38 @@ func (r *PostgresUserRepo) Count() (int, error) {
     err := r.db.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
     return count, err
 }
+
+// FindByEmail mapea sql.ErrNoRows -> repository.ErrNotFound
+func (r *PostgresUserRepo) FindByEmail(email string) (*entity.User, error) {
+    var u entity.User
+    err := r.db.QueryRow(
+        "SELECT id, name, email, created_at, password_hash FROM users WHERE email = $1",
+        email,
+    ).Scan(&u.ID, &u.Name, &u.Email, &u.CreatedAt, &u.PasswordHash)
+    if errors.Is(err, sql.ErrNoRows) {
+        return nil, repository.ErrNotFound
+    }
+    if err != nil {
+        return nil, err
+    }
+    return &u, nil
+}
+
+// Create inserta el usuario y retorna la fila completa con id y created_at generados por Postgres
+func (r *PostgresUserRepo) Create(user entity.User) (*entity.User, error) {
+    var created entity.User
+    err := r.db.QueryRow(
+        "INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id, name, email, created_at",
+        user.Name, user.Email, user.PasswordHash,
+    ).Scan(&created.ID, &created.Name, &created.Email, &created.CreatedAt)
+    if err != nil {
+        return nil, err
+    }
+    return &created, nil
+}
 ```
+
+> `id` y `created_at` son generados por Postgres (`gen_random_uuid()` y `now()`). La capa de aplicacion nunca genera ni asume estos valores.
 
 ### 4. Presentation - Handler y rutas
 
@@ -271,51 +412,105 @@ func (h *UserHandler) List(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
+**AuthHandler — Login y Register** en el mismo handler de autenticacion:
+
+```go
+// internal/presentation/handler/auth_handler.go
+type AuthHandler struct {
+    login    *usecase.Login
+    register *usecase.Register
+}
+
+func NewAuthHandler(login *usecase.Login, register *usecase.Register) *AuthHandler {
+    return &AuthHandler{login: login, register: register}
+}
+
+func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
+    var req dto.RegisterRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "invalid request body", http.StatusBadRequest)
+        return
+    }
+
+    output, err := h.register.Execute(usecase.RegisterInput{
+        Name: req.Name, Email: req.Email, Password: req.Password,
+    })
+    if err != nil {
+        switch {
+        case errors.Is(err, usecase.ErrInvalidInput):
+            http.Error(w, err.Error(), http.StatusBadRequest)       // 400
+        case errors.Is(err, usecase.ErrEmailAlreadyTaken):
+            http.Error(w, "email already taken", http.StatusConflict) // 409
+        default:
+            http.Error(w, "internal server error", http.StatusInternalServerError) // 500
+        }
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated) // 201
+    json.NewEncoder(w).Encode(dto.RegisterResponse{
+        ID: output.User.ID, Name: output.User.Name,
+        Email: output.User.Email, CreatedAt: output.User.CreatedAt,
+    })
+}
+```
+
+**Mapa de codigos HTTP del endpoint `/register`**
+
+| Caso                      | Codigo HTTP |
+| ------------------------- | ----------- |
+| Registro exitoso          | 201 Created |
+| Cuerpo JSON invalido      | 400         |
+| Validacion fallida        | 400 (con mensaje especifico) |
+| Email ya registrado       | 409 Conflict |
+| Error de infraestructura  | 500         |
+
+**DTOs de registro**
+
+```go
+// dto/register_request.go
+type RegisterRequest struct {
+    Name     string `json:"name"`
+    Email    string `json:"email"`
+    Password string `json:"password"`
+}
+
+// dto/register_response.go
+type RegisterResponse struct {
+    ID        string    `json:"id"`
+    Name      string    `json:"name"`
+    Email     string    `json:"email"`
+    CreatedAt time.Time `json:"created_at"`
+}
+```
+
+> `PasswordHash` nunca se incluye en ninguna respuesta — la etiqueta `json:"-"` en la entidad lo excluye automaticamente.
+
 ### 5. Punto de entrada - Wiring
 
 ```go
 // cmd/api/main.go
-package main
-
-import (
-    "database/sql"
-    "log"
-    "net/http"
-    "os"
-
-    _ "github.com/lib/pq"
-
-    "myapp/internal/application/usecase"
-    "myapp/internal/infrastructure/persistence"
-    "myapp/internal/presentation/handler"
-    "myapp/internal/presentation/router"
-)
-
 func main() {
-    dsn := os.Getenv("DATABASE_URL")
-    if dsn == "" {
-        dsn = "postgres://user:pass@localhost/mydb?sslmode=disable"
-    }
+    // Configuracion desde entorno
+    dsn := os.Getenv("DATABASE_URL")      // DATABASE_URL o default local
+    jwtSecret := os.Getenv("JWT_SECRET")  // JWT_SECRET o "change-me-in-production"
 
-    db, err := sql.Open("postgres", dsn)
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer db.Close()
-
-    if err := db.Ping(); err != nil {
-        log.Fatalf("cannot connect to database: %v", err)
-    }
+    db, _ := sql.Open("postgres", dsn)
+    db.Ping()
 
     // Wiring: infrastructure -> application -> presentation
     userRepo := persistence.NewPostgresUserRepo(db)
-    listUsers := usecase.NewListUsers(userRepo)
+
+    listUsers  := usecase.NewListUsers(userRepo)
+    login      := usecase.NewLogin(userRepo, auth.NewJWTTokenService(jwtSecret))
+    register   := usecase.NewRegister(userRepo)
+
     userHandler := handler.NewUserHandler(listUsers)
+    authHandler := handler.NewAuthHandler(login, register)
 
-    r := router.New(userHandler)
-
-    log.Println("Server running on :8080")
-    log.Fatal(http.ListenAndServe(":8080", r))
+    r := router.New(userHandler, authHandler)
+    http.ListenAndServe(":8080", r)
 }
 ```
 
@@ -435,9 +630,10 @@ make down-clean && make up
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Pruebas unitarias (sin I/O, sin Docker, rapidas)       │
-│  ├── usecase/list_users_test.go        → logica de uso  │
-│  ├── handler/user_handler_test.go      → HTTP parsing   │
-│  └── dto/user_response_test.go         → mapeo entity→DTO│
+│  ├── usecase/list_users_test.go        → logica de paginacion    │
+│  ├── usecase/register_test.go          → validacion, hash, errores│
+│  ├── handler/user_handler_test.go      → HTTP parsing            │
+│  └── dto/user_response_test.go         → mapeo entity→DTO        │
 ├─────────────────────────────────────────────────────────┤
 │  Pruebas de integracion (DB real en Docker, lentas)      │
 │  └── persistence/*_integration_test.go → SQL real       │
@@ -450,15 +646,17 @@ make down-clean && make up
 internal/
 ├── application/usecase/
 │   ├── list_users.go
-│   └── list_users_test.go              # Unitario: inyecta mock
+│   ├── list_users_test.go              # Unitario: paginacion y errores
+│   ├── register.go
+│   └── register_test.go               # Unitario: validacion, hash, duplicado, error repo
 │
 ├── domain/repository/
-│   ├── user_repository.go              # Interfaz
-│   └── mock_user_repository.go         # Mock manual (reutilizable)
+│   ├── user_repository.go              # Interfaz + ErrNotFound
+│   └── mock_user_repository.go         # Mock manual (FindAll, Count, FindByEmail, Create)
 │
 ├── infrastructure/persistence/
 │   ├── postgres_user_repo.go
-│   ├── postgres_user_repo_integration_test.go  # Build tag: integration
+│   ├── postgres_user_repo_integration_test.go  # FindAll, Count, Create, FindByEmail
 │   └── testhelper/
 │       └── db.go                       # Conexion + seed para tests
 │
@@ -483,11 +681,23 @@ make test
 
 **Que se prueba en cada capa:**
 
-| Archivo                    | Que valida                                           |
-| -------------------------- | ---------------------------------------------------- |
-| `list_users_test.go`       | Calculo de offset, paginacion, propagacion de errores |
-| `user_handler_test.go`     | Defaults de query params, status codes, content-type  |
-| `user_response_test.go`    | Mapeo entity→DTO, exclusion de campos internos       |
+| Archivo                    | Que valida                                                         |
+| -------------------------- | ------------------------------------------------------------------ |
+| `list_users_test.go`       | Calculo de offset, paginacion, propagacion de errores              |
+| `register_test.go`         | Validacion de campos, hash de contrasena, email duplicado, errores de repo |
+| `user_handler_test.go`     | Defaults de query params, status codes, content-type               |
+| `user_response_test.go`    | Mapeo entity→DTO, exclusion de campos internos                     |
+
+**Casos cubiertos en `register_test.go`:**
+
+| Test                                  | Verifica                                                  |
+| ------------------------------------- | --------------------------------------------------------- |
+| creates user successfully             | ID generado, nombre/email correctos, hash ≠ password plano |
+| returns error when email already taken | `ErrEmailAlreadyTaken` cuando `FindByEmail` devuelve usuario |
+| returns invalid input when name empty | `ErrInvalidInput` wrapeado                                |
+| returns invalid input when bad email  | `ErrInvalidInput` wrapeado                                |
+| returns invalid input when short pwd  | `ErrInvalidInput` wrapeado                                |
+| propagates repository error on Create | error de infra se propaga sin envolver                    |
 
 **Ejemplo — test del caso de uso:**
 
@@ -537,18 +747,15 @@ package persistence_test
 - `NewTestDB(t)` — abre conexion desde `DATABASE_URL`, hace skip si no esta definida.
 - `SeedUsers(t, db, n)` — limpia la tabla, inserta N usuarios, registra cleanup automatico.
 
-**Ejemplo — test de integracion:**
+**Tests de integracion en `postgres_user_repo_integration_test.go`:**
 
-```go
-func TestPostgresUserRepo_FindAll(t *testing.T) {
-    db := testhelper.NewTestDB(t)
-    testhelper.SeedUsers(t, db, 5)
-    repo := persistence.NewPostgresUserRepo(db)
-
-    users, err := repo.FindAll(repository.PaginationParams{Limit: 3, Offset: 0})
-    // ...asserts sobre len(users), contenido, etc.
-}
-```
+| Test                                             | Verifica                                             |
+| ------------------------------------------------ | ---------------------------------------------------- |
+| `TestPostgresUserRepo_FindAll`                   | Limit, offset, pagina vacia                          |
+| `TestPostgresUserRepo_Count`                     | Conteo exacto despues de seed                        |
+| `TestPostgresUserRepo_Create/success`            | INSERT devuelve id y created_at generados por Postgres |
+| `TestPostgresUserRepo_Create/duplicate email`    | Error al insertar email duplicado (UNIQUE constraint) |
+| `TestPostgresUserRepo_Create/FindByEmail 404`    | `ErrNotFound` cuando el email no existe              |
 
 ### Convenciones de testing
 
@@ -557,3 +764,4 @@ func TestPostgresUserRepo_FindAll(t *testing.T) {
 - Mock manual en `domain/repository/` — sin dependencias externas (sin testify, sin mockgen).
 - `testhelper/` encapsula setup de DB — cada test hace seed + cleanup automatico.
 - Paquete `_test` (e.g. `package usecase_test`) para forzar tests de caja negra.
+- Mocks con comportamiento selectivo: usar struct auxiliar en el mismo archivo de test cuando `MockUserRepository.Err` afectaria multiples metodos (ver `createErrorMock` en `register_test.go`).

@@ -1,1 +1,29 @@
+# Environment
 .env
+.env.*
+!.env.example
+
+# Binary output
+bin/
+
+# Go build cache
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Dependency vendor directory (if used)
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

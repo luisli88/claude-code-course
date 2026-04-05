@@ -43,7 +43,8 @@ func main() {
 
 	tokenService := auth.NewJWTTokenService(jwtSecret)
 	login := usecase.NewLogin(userRepo, tokenService)
-	authHandler := handler.NewAuthHandler(login)
+	register := usecase.NewRegister(userRepo)
+	authHandler := handler.NewAuthHandler(login, register)
 
 	r := router.New(userHandler, authHandler)
 
