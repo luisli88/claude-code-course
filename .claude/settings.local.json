@@ -5,7 +5,16 @@
       "Bash(go get:*)",
       "Bash(go build:*)",
       "Bash(go test:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(make build:*)",
+      "Bash(make test:*)",
+      "Bash(docker compose ps:*)",
+      "Bash(docker compose:*)",
+      "Bash(make lint:*)",
+      "Bash(make up:*)",
+      "Bash(make curl-users:*)",
+      "Bash(make test-integration:*)",
+      "Bash(make down-clean:*)"
     ]
   }
 }

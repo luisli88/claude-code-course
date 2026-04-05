@@ -68,7 +68,9 @@ func TestUserHandler_List(t *testing.T) {
 		}
 
 		var body dto.ListUsersResponse
-		json.NewDecoder(rec.Body).Decode(&body)
+		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode body: %v", err)
+		}
 
 		if body.Page != 1 {
 			t.Errorf("expected default page 1, got %d", body.Page)

@@ -22,7 +22,7 @@ func (r *PostgresUserRepo) FindAll(params repository.PaginationParams) ([]entity
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var users []entity.User
 	for rows.Next() {

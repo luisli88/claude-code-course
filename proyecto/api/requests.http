@@ -1,0 +1,21 @@
+@baseUrl = http://localhost:8080
+@token = {{login.response.body.token}}
+
+### Login
+# @name login
+POST {{baseUrl}}/login
+Content-Type: application/json
+
+{
+  "email": "alice@example.com",
+  "password": "password"
+}
+
+### List users (sin autenticación)
+GET {{baseUrl}}/users
+
+### List users — página 1, 10 por página
+GET {{baseUrl}}/users?page=1&page_size=10
+
+### List users — página 2
+GET {{baseUrl}}/users?page=2&page_size=10

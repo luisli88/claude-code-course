@@ -26,7 +26,7 @@ func NewTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("failed to ping db: %v", err)
 	}
 
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	return db
 }
@@ -42,9 +42,10 @@ func SeedUsers(t *testing.T, db *sql.DB, count int) {
 
 	for i := 1; i <= count; i++ {
 		_, err := db.Exec(
-			"INSERT INTO users (name, email) VALUES ($1, $2)",
+			"INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3)",
 			fmt.Sprintf("User %d", i),
 			fmt.Sprintf("user%d@test.com", i),
+			"$2a$10$fQhqpTNLvajhdJvuSN27m.nls7rCu4wZ.EOVxWN1n4G3st7J/wYia",
 		)
 		if err != nil {
 			t.Fatalf("failed to seed user %d: %v", i, err)
@@ -52,6 +53,6 @@ func SeedUsers(t *testing.T, db *sql.DB, count int) {
 	}
 
 	t.Cleanup(func() {
-		db.Exec("DELETE FROM users")
+		_, _ = db.Exec("DELETE FROM users")
 	})
 }

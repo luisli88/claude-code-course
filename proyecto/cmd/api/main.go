@@ -3,29 +3,28 @@ package main
 import (
 	"database/sql"
 	"log"
-	"net/http"
-	"os"
-
-	_ "github.com/lib/pq"
-
 	"myapp/internal/application/usecase"
 	"myapp/internal/infrastructure/auth"
 	"myapp/internal/infrastructure/persistence"
 	"myapp/internal/presentation/handler"
 	"myapp/internal/presentation/router"
+	"net/http"
+	"os"
+
+	_ "github.com/lib/pq"
 )
 
 func main() {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		dsn = "postgres://user:pass@localhost/mydb?sslmode=disable"
+		dsn = "postgres://appuser:apppass@localhost/myapp?sslmode=disable"
 	}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := db.Ping(); err != nil {
 		log.Fatalf("cannot connect to database: %v", err)
