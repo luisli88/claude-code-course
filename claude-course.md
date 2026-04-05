@@ -53,7 +53,7 @@ Deberías poder decir: "Mi proyecto típico consume X tokens, donde Y% son archi
 #### 1.2 Crear .claudeignore Quirúrgico (60 min)
 
 **Por qué esto es crítico:**
-Cada archivo que Claude lee = tokens consumidos. Si lees `node_modules/` con 50k archivos, estás quemando tokens en dependencias que nunca modificarás.
+Cada archivo que Claude lee = tokens consumidos. Si lees `vendor/` con miles de archivos, estás quemando tokens en dependencias que nunca modificarás.
 
 **Acción:**
 
@@ -64,17 +64,17 @@ cd ~/tu-proyecto-actual
 cat > .claudeignore << 'EOF'
 # === BUILDS & ARTIFACTS ===
 # Justificación: Archivos generados, no fuente
-node_modules/
+vendor/
+bin/
 dist/
-build/
-.next/
-coverage/
+tmp/
 
-# === LOCKFILES ===
-# Justificación: Claude no necesita ver deps resueltas
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
+# === BINARIOS COMPILADOS ===
+# Justificación: Claude no puede leer binarios
+*.exe
+*.so
+*.dylib
+*.test
 
 # === ASSETS BINARIOS ===
 # Justificación: Claude no puede leer imágenes/videos
@@ -83,18 +83,19 @@ pnpm-lock.yaml
 *.gif
 *.mp4
 *.mp3
-*.woff
 
 # === LOGS Y TEMPORALES ===
 *.log
 .DS_Store
 *.tmp
+coverage.out
+coverage.html
 
 # === CÓDIGO GENERADO ===
 # Justificación: Generado automáticamente por tooling
-*.generated.ts
-*_pb.js
-__snapshots__/
+*.pb.go
+*_mock.go
+mock_*.go
 EOF
 ```
 
@@ -256,21 +257,20 @@ Revisa tus últimos 5 commits/PRs y responde:
 ## Patterns que SIEMPRE uso:
 
 1. **Backend API Endpoint:**
-   - ¿Siempre uso Express? ¿Fastify?
-   - ¿Estructura: route → controller → service?
-   - ¿Validación con Zod? ¿Joi?
-   - ¿Tests con Jest? ¿Vitest?
+   - stdlib `net/http` + Clean Architecture
+   - ¿Estructura: handler → use case → repository?
+   - ¿Validación manual en use case o handler?
+   - ¿Tests con `testing` stdlib + `testify`?
 
-2. **React Component:**
-   - ¿TypeScript interface para props?
-   - ¿CSS Modules? ¿Tailwind? ¿Styled-components?
-   - ¿Tests con RTL?
-   - ¿Export nombrado o default?
+2. **Domain Entity:**
+   - ¿Struct con campos exportados?
+   - ¿Validación en el constructor?
+   - ¿Errores sentinel exportados?
 
-3. **Database Model:**
-   - ¿Prisma? ¿TypeORM? ¿SQL directo?
-   - ¿Migrations automáticas?
-   - ¿Naming: camelCase o snake_case?
+3. **Database Access:**
+   - ¿`database/sql` directo? ¿`sqlx`? ¿`pgx`?
+   - ¿Migrations manuales en SQL?
+   - ¿Naming: snake_case en DB, PascalCase en Go?
 
 4. **Git Workflow:**
    - ¿Conventional commits?
@@ -311,7 +311,7 @@ Crea `~/.claude/skills/api-route/SKILL.md`:
 ````markdown
 ---
 name: api-route
-description: Genera API endpoint con mi arquitectura de 3 capas
+description: Genera API endpoint con Clean Architecture en Go
 disable-model-invocation: false
 ---
 
@@ -319,147 +319,241 @@ disable-model-invocation: false
 
 ## Cuándo usar este skill
 
-Cuando necesites crear un nuevo endpoint REST.
+Cuando necesites crear un nuevo endpoint REST en Go con Clean Architecture.
 
 ## Arquitectura que SIEMPRE uso
 
-### Capa 1: Route (src/routes/\*.routes.ts)
-
-**Responsabilidad:** Definir HTTP endpoints y aplicar middleware
-
-```typescript
-import { Router } from "express";
-import { validate } from "@/middleware/validate";
-import { authenticate } from "@/middleware/auth";
-import * as controller from "@/controllers/user.controller";
-import * as schema from "@/schemas/user.schema";
-
-const router = Router();
-
-// Patrón: VERBO /recurso/:param
-router.post(
-  "/users",
-  authenticate, // Auth primero
-  validate(schema.create), // Validación después
-  controller.create, // Controller al final
-);
-
-export default router;
+```
+internal/
+├── domain/
+│   ├── entity/          ← Entidades (structs puros, sin deps)
+│   └── repository/      ← Interfaces de repositorio
+├── application/
+│   └── usecase/         ← Lógica de negocio (depende solo de domain)
+├── infrastructure/
+│   └── persistence/     ← Implementaciones concretas de repositorio
+└── presentation/
+    ├── dto/             ← Request/Response structs
+    ├── handler/         ← HTTP handlers
+    └── router/          ← Registro de rutas
 ```
 
-### Capa 2: Controller (src/controllers/\*.controller.ts)
+### Capa 1: Domain Entity (internal/domain/entity/\*.go)
 
-**Responsabilidad:** Manejar request/response, NO lógica de negocio
+**Responsabilidad:** Struct puro sin dependencias externas
 
-```typescript
-import { Request, Response, NextFunction } from "express";
-import * as service from "@/services/user.service";
+```go
+package entity
 
-export async function create(req: Request, res: Response, next: NextFunction) {
-  try {
-    const data = req.body;
-    const result = await service.create(data);
+import "time"
 
-    // Siempre retornar en envelope { data: ... }
-    res.status(201).json({ data: result });
-  } catch (error) {
-    next(error); // Pasar error a error handler
-  }
+type Product struct {
+    ID        int
+    Name      string
+    Price     float64
+    Category  string
+    CreatedAt time.Time
 }
 ```
 
-### Capa 3: Service (src/services/\*.service.ts)
+### Capa 2: Repository Interface (internal/domain/repository/\*.go)
 
-**Responsabilidad:** Lógica de negocio y acceso a datos
+**Responsabilidad:** Contrato de acceso a datos (solo interfaces)
 
-```typescript
-import { prisma } from "@/db/client";
-import { CreateUserDto } from "@/types/user.types";
+```go
+package repository
 
-export async function create(data: CreateUserDto) {
-  // Validaciones de negocio aquí
-  // Llamadas a DB aquí
-  const user = await prisma.user.create({ data });
-  return user;
+import "myapp/internal/domain/entity"
+
+var ErrNotFound = errors.New("not found")
+
+type ProductRepository interface {
+    Create(p entity.Product) (*entity.Product, error)
+    FindByID(id int) (*entity.Product, error)
 }
 ```
 
-### Schema de Validación (src/schemas/\*.schema.ts)
+### Capa 3: Use Case (internal/application/usecase/\*.go)
 
-**Responsabilidad:** Definir estructura de datos válida
+**Responsabilidad:** Lógica de negocio, validación, orquestación
 
-```typescript
-import { z } from "zod";
+```go
+package usecase
 
-export const create = z.object({
-  body: z.object({
-    email: z.string().email(),
-    name: z.string().min(1),
-    age: z.number().int().min(18).optional(),
-  }),
-});
+import (
+    "errors"
+    "myapp/internal/domain/entity"
+    "myapp/internal/domain/repository"
+)
 
-export type CreateUserDto = z.infer<typeof create.body>;
+var (
+    ErrInvalidInput = errors.New("invalid input")
+    ErrNotFound     = errors.New("product not found")
+)
+
+type CreateProduct struct {
+    repo repository.ProductRepository
+}
+
+func NewCreateProduct(repo repository.ProductRepository) *CreateProduct {
+    return &CreateProduct{repo: repo}
+}
+
+func (uc *CreateProduct) Execute(name string, price float64, category string) (*entity.Product, error) {
+    if name == "" {
+        return nil, ErrInvalidInput
+    }
+    if price < 0 {
+        return nil, ErrInvalidInput
+    }
+    p := entity.Product{Name: name, Price: price, Category: category}
+    return uc.repo.Create(p)
+}
 ```
 
-### Tests (src/\*_/_.test.ts)
+### Capa 4: DTO (internal/presentation/dto/\*.go)
 
-**Responsabilidad:** Validar comportamiento
+**Responsabilidad:** Estructuras de serialización HTTP
 
-```typescript
-import request from "supertest";
-import { app } from "@/app";
+```go
+package dto
 
-describe("POST /api/users", () => {
-  it("should create user with valid data", async () => {
-    const res = await request(app)
-      .post("/api/users")
-      .send({ email: "test@test.com", name: "Test" })
-      .expect(201);
+type CreateProductRequest struct {
+    Name     string  `json:"name"`
+    Price    float64 `json:"price"`
+    Category string  `json:"category"`
+}
 
-    expect(res.body.data).toHaveProperty("id");
-  });
+type CreateProductResponse struct {
+    ID        int     `json:"id"`
+    Name      string  `json:"name"`
+    Price     float64 `json:"price"`
+    Category  string  `json:"category"`
+    CreatedAt string  `json:"created_at"`
+}
+```
 
-  it("should reject invalid email", async () => {
-    await request(app)
-      .post("/api/users")
-      .send({ email: "invalid", name: "Test" })
-      .expect(400);
-  });
-});
+### Capa 5: Handler (internal/presentation/handler/\*.go)
+
+**Responsabilidad:** Manejar request/response HTTP, NO lógica de negocio
+
+```go
+package handler
+
+import (
+    "encoding/json"
+    "net/http"
+    "myapp/internal/application/usecase"
+    "myapp/internal/presentation/dto"
+)
+
+type ProductHandler struct {
+    createProduct *usecase.CreateProduct
+}
+
+func NewProductHandler(uc *usecase.CreateProduct) *ProductHandler {
+    return &ProductHandler{createProduct: uc}
+}
+
+func (h *ProductHandler) Create(w http.ResponseWriter, r *http.Request) {
+    var req dto.CreateProductRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "invalid body", http.StatusBadRequest)
+        return
+    }
+
+    product, err := h.createProduct.Execute(req.Name, req.Price, req.Category)
+    if err != nil {
+        if errors.Is(err, usecase.ErrInvalidInput) {
+            http.Error(w, err.Error(), http.StatusBadRequest)
+            return
+        }
+        http.Error(w, "internal error", http.StatusInternalServerError)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(dto.CreateProductResponse{
+        ID:       product.ID,
+        Name:     product.Name,
+        Price:    product.Price,
+        Category: product.Category,
+    })
+}
+```
+
+### Tests (internal/application/usecase/\*_test.go)
+
+**Responsabilidad:** Validar comportamiento con mock del repositorio
+
+```go
+package usecase_test
+
+import (
+    "testing"
+    "myapp/internal/application/usecase"
+    "myapp/internal/domain/repository"
+)
+
+func TestCreateProduct_Success(t *testing.T) {
+    repo := repository.NewMockProductRepository()
+    uc := usecase.NewCreateProduct(repo)
+
+    product, err := uc.Execute("Widget", 9.99, "tools")
+
+    if err != nil {
+        t.Fatalf("expected no error, got %v", err)
+    }
+    if product.Name != "Widget" {
+        t.Errorf("expected name Widget, got %s", product.Name)
+    }
+}
+
+func TestCreateProduct_InvalidInput(t *testing.T) {
+    repo := repository.NewMockProductRepository()
+    uc := usecase.NewCreateProduct(repo)
+
+    _, err := uc.Execute("", 9.99, "tools")
+
+    if !errors.Is(err, usecase.ErrInvalidInput) {
+        t.Errorf("expected ErrInvalidInput, got %v", err)
+    }
+}
 ```
 
 ## Checklist de implementación
 
 Cuando crees un endpoint, DEBES:
 
-- [ ] Crear route en archivo correcto
-- [ ] Controller con try/catch
-- [ ] Service con lógica de negocio
-- [ ] Schema de validación Zod
-- [ ] Mínimo 2 tests (happy + error path)
-- [ ] Types exportados
-- [ ] Imports usando alias `@/`
+- [ ] Entity en `domain/entity/`
+- [ ] Interface en `domain/repository/`
+- [ ] Use case en `application/usecase/`
+- [ ] DTO request/response en `presentation/dto/`
+- [ ] Handler en `presentation/handler/`
+- [ ] Ruta registrada en `presentation/router/`
+- [ ] Use case wired en `cmd/api/main.go`
+- [ ] Mínimo 2 tests de use case (happy + error path)
 
 ## Errores comunes a EVITAR
 
-❌ Lógica de negocio en controller
-❌ Acceso directo a DB desde route
-❌ Validación manual (siempre usar Zod)
-❌ `any` types
+❌ Lógica de negocio en handler
+❌ Acceso directo a DB desde handler o use case
+❌ Importar `infrastructure/` desde `application/` o `domain/`
+❌ `interface{}` sin justificación
 ❌ Commits sin tests
 ````
 
 **Validación de comprensión:**
 
-**Pregunta 1:** "¿Por qué separamos en 3 capas?"
-_Respuesta esperada:_ "Separación de responsabilidades: Route maneja HTTP, Controller maneja req/res, Service maneja lógica de negocio. Más testeable y mantenible."
+**Pregunta 1:** "¿Por qué separamos en estas capas?"
+_Respuesta esperada:_ "Clean Architecture con dependency rule estricta: Presentation → Application → Domain ← Infrastructure. Domain y Application no saben nada de HTTP ni de la DB concreta, son 100% testeables sin levantar el servidor."
 
-**Pregunta 2:** "¿Por qué validación con Zod en middleware en vez de manualmente en controller?"
-_Respuesta esperada:_ "Centralizamos validación, reutilizable, automáticamente genera tipos TypeScript, maneja errores consistentemente."
+**Pregunta 2:** "¿Por qué validar en use case y no en handler?"
+_Respuesta esperada:_ "El use case es la lógica de negocio, y las reglas de negocio incluyen validación. Si valido en el handler, la validación queda acoplada a HTTP y no puedo reutilizarla desde CLI, jobs, etc."
 
-**Pregunta 3:** "¿Qué pasa si pongo lógica de negocio en controller?"
-_Respuesta esperada:_ "Controller se vuelve difícil de testear (requiere mock de req/res), lógica no reutilizable, viola Single Responsibility Principle."
+**Pregunta 3:** "¿Qué pasa si el handler importa el repositorio directamente?"
+_Respuesta esperada:_ "Viola la dependency rule: Presentation no debe depender de Infrastructure. El handler se vuelve imposible de testear sin una DB real, y cambiar la DB rompe el handler."
 
 #### 2.3 Usar el Skill (30 min)
 
@@ -473,29 +567,30 @@ claude
 
 "Crea endpoint POST /api/products para crear producto con:
 - name (string, required)
-- price (number, min 0)
-- category (string, enum: electronics, clothing, food)"
+- price (float, min 0)
+- category (string, uno de: electronics, clothing, food)"
 ```
 
 **Qué debería pasar:**
 Claude generará automáticamente:
 
-1. `src/routes/product.routes.ts`
-2. `src/controllers/product.controller.ts`
-3. `src/services/product.service.ts`
-4. `src/schemas/product.schema.ts`
-5. `src/controllers/product.controller.test.ts`
+1. `internal/domain/entity/product.go`
+2. `internal/domain/repository/product_repository.go`
+3. `internal/application/usecase/create_product.go`
+4. `internal/application/usecase/create_product_test.go`
+5. `internal/presentation/dto/create_product_request.go`
+6. `internal/presentation/handler/product_handler.go`
 
-Todo siguiendo tu estructura exacta.
+Todo siguiendo tu estructura de Clean Architecture.
 
 **Validación:**
 Verifica que los archivos generados:
 
-- [ ] Siguen la estructura de 3 capas
-- [ ] Usan imports con alias `@/`
-- [ ] Validación con Zod
-- [ ] Tests incluidos
-- [ ] Try/catch en controller
+- [ ] Siguen el flujo domain → usecase → handler
+- [ ] No importan `infrastructure/` desde `application/` o `domain/`
+- [ ] Validación en use case, no en handler
+- [ ] Tests de use case con mock de repositorio
+- [ ] Errores sentinel exportados
 
 **Comparación:**
 
@@ -549,10 +644,12 @@ disable-model-invocation: true
 
 Basado en path de archivos modificados:
 
-- `src/auth/*` → scope: `auth`
-- `src/api/users/*` → scope: `users`
-- `components/Product/*` → scope: `product`
-- `tests/*` → scope: `test`
+- `internal/domain/entity/user*` → scope: `user`
+- `internal/application/usecase/auth*` → scope: `auth`
+- `internal/infrastructure/persistence/*` → scope: `db`
+- `internal/presentation/handler/*` → scope: `handler`
+- `migrations/*` → scope: `migration`
+- `cmd/api/*` → scope: `main`
 
 ## Formato Output
 
@@ -587,36 +684,36 @@ git commit -m "mensaje generado"
 
 ```
 git diff --cached:
-+ src/auth/jwt.service.ts: function generateToken()
++ internal/application/usecase/login.go: func Execute()
 
 Output:
-feat(auth): implement JWT token generation
+feat(auth): implement login use case
 ```
 
 ### Example 2: Bug fix con context
 
 ```
 git diff --cached:
-- src/api/users/controller.ts: missing null check
+- internal/infrastructure/persistence/postgres_user_repo.go: missing ErrNotFound mapping
 
 Output:
-fix(users): handle null user in update endpoint
+fix(db): map sql.ErrNoRows to repository.ErrNotFound
 
-Added null check before updating user to prevent
-500 error when user not found.
+FindByEmail was returning raw sql.ErrNoRows instead of
+the sentinel error, breaking callers that used errors.Is().
 ```
 
 ### Example 3: Breaking change
 
 ```
 git diff --cached:
-- src/api/v1/users → src/api/v2/users (incompatible)
+- internal/domain/repository/user_repository.go: FindByID signature changed
 
 Output:
-feat(api): migrate to v2 API structure
+feat(domain): add context to UserRepository interface
 
-BREAKING CHANGE: API v1 endpoints removed.
-Clients must migrate to v2 endpoints.
+BREAKING CHANGE: All repository methods now require context.Context.
+Implementations must be updated to pass ctx to sql calls.
 ```
 ````
 
@@ -669,18 +766,18 @@ Revisar código staged antes de commit para detectar issues.
 
 ### 🐛 Bugs Potenciales
 
-- [ ] Null/undefined checks
-- [ ] Array bounds
-- [ ] Off-by-one errors
-- [ ] Race conditions en async
-- [ ] Memory leaks (listeners no removidos)
-- [ ] Error handling incompleto
+- [ ] Errores ignorados (err asignado pero no chequeado)
+- [ ] Nil pointer dereference
+- [ ] Off-by-one en slices
+- [ ] Race conditions en goroutines (vars compartidas sin mutex)
+- [ ] Goroutine leaks (goroutines que no terminan)
+- [ ] Context cancelation no propagada
 
 ### 🔒 Security Issues
 
-- [ ] Input validation (XSS, injection)
+- [ ] Input validation (SQL injection, path traversal)
 - [ ] Autenticación en endpoints sensibles
-- [ ] Secrets hardcodeados
+- [ ] Secrets hardcodeados (tokens, passwords en código)
 - [ ] CORS configurado correctamente
 - [ ] Rate limiting en endpoints públicos
 - [ ] Datos sensibles en logs
@@ -689,32 +786,33 @@ Revisar código staged antes de commit para detectar issues.
 
 - [ ] Loops O(n²) o peor
 - [ ] Queries N+1 (DB)
-- [ ] Re-renders innecesarios (React)
-- [ ] Caching opportunities
+- [ ] Allocations innecesarias en hot path
+- [ ] DB connections no cerradas (defer rows.Close())
 - [ ] Large payloads sin pagination
 
 ### 🎨 Code Quality
 
-- [ ] Nombres descriptivos
+- [ ] Nombres descriptivos (Go idiomático: `err` no `error`, `r` para reader)
 - [ ] Funciones < 50 líneas
 - [ ] DRY violations
-- [ ] Magic numbers (usar constants)
-- [ ] Comentarios solo donde necesario
-- [ ] TypeScript: no `any` sin justificación
+- [ ] Magic numbers (usar constantes)
+- [ ] Comentarios solo donde necesario (exported types/funcs documentadas)
+- [ ] No `interface{}` sin justificación
+- [ ] Dependency rule respetada (no imports cross-layer incorrectos)
 
 ### ✅ Testing
 
 - [ ] Happy path covered
-- [ ] Error cases covered
-- [ ] Edge cases (empty, null, límites)
-- [ ] Mocks apropiados
-- [ ] Assertions específicas (no genéricas)
+- [ ] Error cases covered (cada rama de error)
+- [ ] Edge cases (empty string, zero value, nil)
+- [ ] Mocks apropiados (sin tocar DB real en unit tests)
+- [ ] Subtests con `t.Run` para legibilidad
 
 ### 📚 Documentation
 
-- [ ] JSDoc en funciones públicas
+- [ ] Comentarios godoc en funciones/types exportados
 - [ ] README actualizado si nueva feature
-- [ ] Types exportados y documentados
+- [ ] Errores sentinel documentados
 
 ## Proceso de Review
 
@@ -778,21 +876,24 @@ claude
 
 **Ejercicio:** Crea código intencionalmente malo y pásalo por `/review`:
 
-```typescript
-// src/bad-example.ts
-export async function getUser(id: any) {
-  const user = await db.query(`SELECT * FROM users WHERE id = ${id}`);
-  return user;
+```go
+// internal/infrastructure/persistence/bad_example.go
+func GetUser(db *sql.DB, id string) *User {
+    row := db.QueryRow("SELECT * FROM users WHERE id = " + id)
+    var u User
+    row.Scan(&u.ID, &u.Name)
+    return &u
 }
 ```
 
 **Pregunta:** "¿Qué debería detectar el skill?"
 _Respuesta esperada:_
 
-- ❌ Critical: SQL injection (interpolación directa)
-- ⚠️ Warning: `any` type sin justificación
-- ⚠️ Warning: No error handling (await sin try/catch)
-- 💡 Suggestion: No validación de input
+- ❌ Critical: SQL injection (concatenación directa en query)
+- ⚠️ Warning: Error de `row.Scan` ignorado
+- ⚠️ Warning: Error de `db.QueryRow` no chequeado
+- ⚠️ Warning: Retorna `*User` nil si no encuentra (nil pointer en caller)
+- 💡 Suggestion: Usar `$1` placeholder + parámetro separado
 
 ---
 
@@ -940,23 +1041,26 @@ _Respuesta esperada:_ "Código clever es difícil de entender y mantener. Prefie
 
 **Required:**
 
-- [Tu elección: TypeScript/Node? Python/FastAPI? Go?]
-- [Tu elección: Express? Fastify? Nest?]
-- [Tu elección: Prisma? TypeORM? SQL directo?]
-- [Tu validación: Zod? Joi? class-validator?]
+- Go (stdlib `net/http` + `database/sql`, sin frameworks)
+- PostgreSQL con driver `github.com/lib/pq` o `pgx`
+- Validación manual en use cases (sin librerías de validación)
+- JWT con `github.com/golang-jwt/jwt/v5`
+- Passwords con `golang.org/x/crypto/bcrypt`
 
 **Prohibited:**
 
-- [Lo que NUNCA usas: "JavaScript puro (siempre TypeScript)"]
-- [Lo que evitas: "ORMs custom"]
+- Frameworks HTTP (Gin, Echo, Fiber) — stdlib es suficiente
+- ORMs (GORM) — SQL directo es más legible y controlable
+- `interface{}` sin justificación clara
 
-### Frontend
+### Herramientas
 
 **Required:**
 
-- [React? Vue? Svelte?]
-- [Vite? Webpack? Next?]
-- [Styling: Tailwind? CSS Modules? Styled-components?]
+- `golangci-lint` para linting
+- `go test ./...` para tests (con `-race` para detectar race conditions)
+- Docker + `docker-compose` para DB local
+- SQL migrations en archivos `.sql` versionados
 
 **Tu turno:** Lista TU stack. Sé específico con versiones si importa.
 ```
@@ -972,21 +1076,30 @@ _Respuesta esperada:_ "Código clever es difícil de entender y mantener. Prefie
 ````markdown
 ## Architecture Patterns
 
-### Backend Structure
+### Backend Structure — Clean Architecture
 
 ```
+cmd/api/
+└── main.go              # Composition root: wiring de todas las capas
 
-src/
-├── routes/ # ¿Qué va aquí?
-├── controllers/ # ¿Qué responsabilidad?
-├── services/ # ¿Qué lógica?
-├── models/ # ¿Prisma? TypeORM?
-├── schemas/ # ¿Validación?
-└── utils/ # ¿Helpers?
+internal/
+├── domain/
+│   ├── entity/          # Structs puros, sin deps externas
+│   └── repository/      # Interfaces de repositorio + errores sentinel
+├── application/
+│   └── usecase/         # Lógica de negocio (depende solo de domain)
+├── infrastructure/
+│   └── persistence/     # Implementaciones concretas (Postgres, etc.)
+└── presentation/
+    ├── dto/             # Request/Response structs JSON
+    ├── handler/         # HTTP handlers (llaman use cases)
+    └── router/          # Registro de rutas
 
+migrations/              # Archivos .sql versionados
 ```
 
-**Tu turno:** Dibuja TU estructura típica. ¿3 capas? ¿4? ¿Domain-Driven Design?
+**Dependency rule:** Presentation → Application → Domain ← Infrastructure
+**Tu turno:** Dibuja TU estructura. ¿Usas este layout? ¿Hay capas extra?
 ````
 
 **Validación de comprensión:**
@@ -1006,38 +1119,36 @@ Si no puede, tu estructura no es clara. Refina.
 
 ### Naming Conventions
 
-- Variables/Funciones: ¿camelCase? ¿snake_case?
-- Clases: ¿PascalCase?
-- Constantes: ¿UPPER_SNAKE_CASE?
-- Archivos: ¿kebab-case? ¿PascalCase?
+- Variables/funciones unexported: `camelCase`
+- Types/funcs exported: `PascalCase`
+- Constantes: `PascalCase` si exported, `camelCase` si no
+- Archivos: `snake_case.go` (ej: `user_repository.go`)
+- Errores sentinel: `ErrXxx` (ej: `ErrNotFound`)
+- Interfaces de 1 método: nombre del método + `-er` (ej: `Reader`, `UserCreator`)
 
 ### Function Guidelines
 
-- Max líneas por función: [50? 100?]
-- Max parámetros: [3? 4?]
-- ¿Prefieres funciones puras?
-- ¿Documentas funciones públicas?
+- Max líneas por función: 50
+- Max parámetros: 4 (si más, agrupar en struct)
+- Retornar siempre `(value, error)` en funciones que pueden fallar
+- Preferir funciones pequeñas y enfocadas
 
 ### Error Handling
 
-¿Cómo manejas errores?
+Go no tiene excepciones. El patrón estándar:
 
-Ejemplo:
-
-```typescript
-// ¿Así?
-try {
-  await operation();
-} catch (error) {
-  logger.error(error);
-  throw new CustomError("Failed", 500);
+```go
+// ✅ Siempre verificar errores
+result, err := operation()
+if err != nil {
+    return nil, fmt.Errorf("operation failed: %w", err)
 }
 
-// ¿O así?
-const result = await operation();
-if (result.error) {
-  return { error: result.error };
-}
+// ✅ Errores sentinel para que el caller pueda hacer errors.Is()
+var ErrNotFound = errors.New("not found")
+
+// ✅ Wrapping con contexto
+return nil, fmt.Errorf("findUser(%d): %w", id, ErrNotFound)
 ```
 ````
 
@@ -1047,12 +1158,12 @@ if (result.error) {
 
 Escribe una función usando TUS naming conventions:
 
-```typescript
+```go
 // ¿Cómo la nombrarías?
-function ???(???) {
-  // ¿Cómo manejas errores?
-  // ¿Cómo nombras variables?
-  // ¿Usas tipos explícitos?
+func ???(???) (???, error) {
+    // ¿Cómo manejas errores?
+    // ¿Cómo nombras variables?
+    // ¿Usas fmt.Errorf con %w?
 }
 ```
 
@@ -1063,10 +1174,12 @@ function ???(???) {
 
 Estas reglas NO se negocian NUNCA:
 
-1. ✅ [Tu regla: "TypeScript strict mode"]
-2. ✅ [Tu regla: "Tests antes de merge"]
-3. ✅ [Tu regla: "No secrets en código"]
-4. ✅ [...]
+1. ✅ Todos los errores deben verificarse (nunca `_` para errores)
+2. ✅ Tests antes de merge (unit tests pasan sin DB)
+3. ✅ No secrets en código (usar variables de entorno)
+4. ✅ Dependency rule respetada (no imports cross-layer incorrectos)
+5. ✅ `golangci-lint` pasa sin warnings
+6. ✅ [Tu regla adicional...]
 
 **Tu turno:** ¿Cuáles son tus 5-10 reglas innegociables?
 ```
@@ -1384,19 +1497,26 @@ Convierte este acceptance criteria a test:
 
 "Given valid reset link, when I click, then I see password form"
 
-```typescript
-// Tu test:
-it("should show password form for valid reset link", async () => {
-  // Arrange (Given)
-  const validToken = await generateResetToken(user);
+```go
+// internal/application/usecase/verify_reset_token_test.go
+func TestVerifyResetToken_ValidToken(t *testing.T) {
+    // Arrange (Given)
+    repo := repository.NewMockTokenRepository()
+    validToken := "abc123"
+    repo.Add(entity.PasswordResetToken{Token: validToken, ExpiresAt: time.Now().Add(time.Hour)})
+    uc := usecase.NewVerifyResetToken(repo)
 
-  // Act (When)
-  const response = await request(app).get(`/reset/${validToken}`);
+    // Act (When)
+    result, err := uc.Execute(validToken)
 
-  // Assert (Then)
-  expect(response.status).toBe(200);
-  expect(response.body).toHaveProperty("passwordForm");
-});
+    // Assert (Then)
+    if err != nil {
+        t.Fatalf("expected no error, got %v", err)
+    }
+    if !result.Valid {
+        t.Error("expected token to be valid")
+    }
+}
 ```
 
 **Parte 4: Technical Specification**
@@ -1424,18 +1544,30 @@ Response: { valid: boolean, expiresAt?: string }
 
 ### Database Schema
 
-```prisma
-model PasswordResetToken {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token     String   @unique @db.VarChar(64)
-  expiresAt DateTime
-  used      Boolean  @default(false)
-  createdAt DateTime @default(now())
+```sql
+-- migrations/003_add_password_reset_tokens.sql
+CREATE TABLE password_reset_tokens (
+    id         SERIAL PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token      VARCHAR(64) NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
-  @@index([token])
-  @@index([userId])
+CREATE INDEX idx_password_reset_tokens_token   ON password_reset_tokens(token);
+CREATE INDEX idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
+```
+
+```go
+// internal/domain/entity/password_reset_token.go
+type PasswordResetToken struct {
+    ID        int
+    UserID    int
+    Token     string
+    ExpiresAt time.Time
+    Used      bool
+    CreatedAt time.Time
 }
 ```
 
@@ -1523,50 +1655,55 @@ Output a plan.md"
 
 **Tasks:**
 
-1. Create Prisma schema for PasswordResetToken
-2. Generate and apply migration
-3. Add relation to User model
-4. Create seed data for testing
+1. Crear entity `PasswordResetToken` en `internal/domain/entity/`
+2. Crear interface `PasswordResetTokenRepository` en `internal/domain/repository/`
+3. Escribir migration SQL en `migrations/`
+4. Implementar `PostgresPasswordResetTokenRepo` en `internal/infrastructure/persistence/`
 
 **Files:**
 
-- `prisma/schema.prisma` (modify)
-- `prisma/migrations/XXX_add_password_reset.sql` (create)
+- `internal/domain/entity/password_reset_token.go` (create)
+- `internal/domain/repository/password_reset_token_repository.go` (create)
+- `migrations/003_add_password_reset_tokens.sql` (create)
+- `internal/infrastructure/persistence/postgres_token_repo.go` (create)
 
 **Validation:**
 
 ```bash
-npx prisma migrate dev
-npx prisma studio  # Verify table exists
+make down-clean && make up   # Aplica migration
+make db-shell                # Verificar tabla existe: \d password_reset_tokens
+go build ./...               # Compila sin errores
 ```
 
 **Dependencies:** None
 
 ---
 
-## Phase 2: Core Services (4h)
+## Phase 2: Core Use Cases (4h)
 
 **Objective:** Business logic
 
 **Tasks:**
 
-1. Token generation service (crypto.randomBytes)
-2. Email service integration (SendGrid/Nodemailer)
-3. Password reset service (generate, verify, reset)
-4. Unit tests (>80% coverage)
+1. Use case `RequestPasswordReset` (genera token, llama email service)
+2. Use case `VerifyResetToken` (verifica validez y expiración)
+3. Use case `ResetPassword` (aplica nuevo password, invalida token)
+4. Unit tests con mocks (>80% coverage)
 
 **Files:**
 
-- `src/services/token.service.ts` (create)
-- `src/services/email.service.ts` (modify)
-- `src/services/password-reset.service.ts` (create)
-- `src/services/*.test.ts` (create)
+- `internal/application/usecase/request_password_reset.go` (create)
+- `internal/application/usecase/verify_reset_token.go` (create)
+- `internal/application/usecase/reset_password.go` (create)
+- `internal/application/usecase/*_test.go` (create)
 
 **Validation:**
 
 ```bash
-npm test src/services
-# All tests pass, coverage >80%
+go test ./internal/application/usecase/...
+# All tests pass
+go test -race ./internal/application/usecase/...
+# No race conditions
 ```
 
 **Dependencies:** Phase 1 complete
@@ -1611,31 +1748,32 @@ Output a tasks.md"
 
 ## Phase 1: Database & Models
 
-### Task 1.1: Prisma Schema Extension
+### Task 1.1: Domain Entity & Repository Interface
 
 **Time:** 30 min
 **Dependencies:** None
 
 **Description:**
-Add PasswordResetToken model to Prisma schema
+Crear entity `PasswordResetToken` y su interface de repositorio
 
 **Files:**
 
-- `prisma/schema.prisma`
+- `internal/domain/entity/password_reset_token.go`
+- `internal/domain/repository/password_reset_token_repository.go`
 
 **Implementation:**
-[Código específico del model]
+[Struct entity + interface con métodos Create, FindByToken, MarkUsed]
 
 **Acceptance Criteria:**
 
-- [ ] Model compiles without errors
-- [ ] Indexes created
-- [ ] Relation to User configured
+- [ ] Struct compila sin errores
+- [ ] Interface define todos los métodos necesarios
+- [ ] Error sentinel `ErrTokenNotFound` exportado
 
 **Validation:**
 
 ```bash
-npx prisma validate
+go build ./internal/domain/...
 ```
 
 ---
@@ -1749,9 +1887,10 @@ For each task in tasks.md:
 ### Validation Commands (run after EACH task)
 
 ```bash
-npm run lint           # ESLint pass
-npm run type-check     # TypeScript compiles
-npm test               # Tests pass
+go build ./...         # Compila sin errores
+go vet ./...           # Análisis estático
+golangci-lint run      # Linting
+go test ./...          # Tests pasan
 ```
 
 ### Commit Protocol
@@ -1855,32 +1994,32 @@ Reading constitution... ✓
 Starting Phase 1: Database & Models
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Task 1.1: Prisma Schema Extension
+Task 1.1: Domain Entity & Repository Interface
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Implementation:
-- Creating PasswordResetToken model
-- Adding relation to User model
-- Configuring indexes
+- Creating internal/domain/entity/password_reset_token.go
+- Creating internal/domain/repository/password_reset_token_repository.go
+- Adding ErrTokenNotFound sentinel
 
 [Shows code being written]
 
 Validation:
-$ npx prisma validate
-✓ Schema is valid
+$ go build ./internal/domain/...
+✓ Compila sin errores
 
-$ npx prisma format
-✓ Formatted
+$ go vet ./internal/domain/...
+✓ Sin issues
 
 Committing:
-$ git add prisma/schema.prisma
-$ git commit -m "feat(auth): add password reset token model
+$ git add internal/domain/
+$ git commit -m "feat(domain): add password reset token entity and repository interface
 
 Implements task 1.1 from plan
 
-- Added PasswordResetToken model
-- Configured cascade delete
-- Added indexes for performance
+- PasswordResetToken entity with all required fields
+- Repository interface: Create, FindByToken, MarkUsed
+- ErrTokenNotFound sentinel exported
 
 Ref: docs/tasks/tasks.md#task11"
 
@@ -1892,16 +2031,14 @@ Task 1.2: Database Migration
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Implementation:
-$ npx prisma migrate dev --name add_password_reset
+- Creating migrations/003_add_password_reset_tokens.sql
 
-✓ Migration generated
+$ make down-clean && make up   # Aplica migration
 ✓ Migration applied
-✓ Prisma Client regenerated
 
-Validation:
-$ npx prisma studio
-[Opens studio, verifies table]
-✓ Table exists with correct schema
+$ make db-shell
+\d password_reset_tokens       # Verify schema
+✓ Table exists with correct columns and indexes
 
 Committing:
 [Shows commit]
@@ -1959,31 +2096,30 @@ _Respuesta esperada:_ "Commits pequeños = historia clara, fácil rollback si al
 Task 3.2: Rate Limiting Middleware
 
 Issue:
-Current project doesn't have rate limiting package.
-
-Spec says: "3 requests per hour per email"
+El proyecto no tiene rate limiting. Spec dice "3 requests per hour per email".
 
 Options:
-1. express-rate-limit (simple, popular)
-   - Pros: Easy setup, 5M+ downloads/week
-   - Cons: Memory-based (resets on restart)
+1. In-memory map con mutex (simple)
+   - Pros: Sin dependencias extra, zero setup
+   - Cons: Se resetea al reiniciar el servidor, no escala horizontalmente
 
-2. rate-limiter-flexible (advanced)
-   - Pros: Redis-backed, persistent, distributed
-   - Cons: Requires Redis setup
+2. Redis con `go-redis` (persistente)
+   - Pros: Persiste entre reinicios, funciona con múltiples instancias
+   - Cons: Requiere levantar Redis en docker-compose
 
-3. Custom implementation
-   - Pros: Full control
-   - Cons: Time consuming, potential bugs
+3. PostgreSQL como backend de rate limit
+   - Pros: Sin deps extra (ya tenemos Postgres)
+   - Cons: Más lento que Redis para operaciones de contador
 
-Recommendation: Option 2 (rate-limiter-flexible)
-Reasoning: Spec requires persistence across requests.
-           Memory-based fails requirement.
+Recommendation: Option 2 (Redis)
+Reasoning: Spec requiere persistencia entre requests.
+           In-memory falla si el server se reinicia.
 
 Decision needed:
-A) Approve Option 2, I'll install redis + rate-limiter-flexible
-B) Choose different option
-C) Revise spec to not require persistence
+A) Approve Option 2, agrego Redis a docker-compose.yml
+B) Option 1 (in-memory es suficiente para este MVP)
+C) Option 3 (usar Postgres existente)
+D) Revisar spec para no requerir persistencia
 
 Waiting for human input...
 ```
@@ -2126,34 +2262,34 @@ NO uses subagents cuando:
 **Ejemplo de cuándo SI:**
 
 ```
-Proyecto: E-commerce Platform
+Proyecto: E-commerce Platform (microservicios)
 
 Estructura:
-apps/
-├── web/           # Next.js frontend (20k líneas)
-├── api/           # Node.js backend (30k líneas)
-├── admin/         # Admin panel (15k líneas)
-└── mobile/        # React Native (25k líneas)
+services/
+├── catalog/       # Go API: productos (15k líneas)
+├── orders/        # Go API: pedidos (20k líneas)
+├── auth/          # Go API: autenticación (10k líneas)
+└── notifications/ # Go worker: emails/SMS (8k líneas)
 
-packages/
-├── ui/            # Component library (5k líneas)
-└── shared/        # Shared utils (3k líneas)
+web/               # Frontend React (20k líneas)
+admin/             # Admin panel (15k líneas)
 
-Total: 98k líneas → PERFECTO para subagents
+Total: 88k líneas → PERFECTO para subagents
 ```
 
 **Ejemplo de cuándo NO:**
 
 ```
-Proyecto: Todo List App
+Proyecto: Todo List API
 
 Estructura:
-src/
-├── components/    # React (2k líneas)
-├── api/           # Express (1.5k líneas)
-└── db/            # Prisma (0.5k líneas)
+internal/
+├── domain/        # (0.5k líneas)
+├── application/   # (1k líneas)
+├── infrastructure/ # (1k líneas)
+└── presentation/  # (1k líneas)
 
-Total: 4k líneas → Single agent suficiente
+Total: 3.5k líneas → Single agent suficiente
 ```
 
 **Ejercicio de comprensión:**
@@ -2183,61 +2319,57 @@ cd ~/projects/ecommerce-platform
 mkdir -p .claude/agents
 ```
 
-**Subagent 1: Frontend (Web)**
+**Subagent 1: Catalog Service**
 
-`.claude/agents/web/CLAUDE.md`:
+`.claude/agents/catalog/CLAUDE.md`:
 
 ```markdown
-# Web Frontend Subagent
+# Catalog Service Subagent
 
 ## Domain Boundary
 
-**Scope:** apps/web/ directory ONLY
+**Scope:** services/catalog/ directory ONLY
 
 **I can:**
 
-- Modify files in apps/web/
-- Read packages/\* for types/utils
-- Read docs/api-contracts/ for backend contracts
+- Modify files in services/catalog/
+- Read docs/api-contracts/ para contratos con otros servicios
 
 **I cannot:**
 
-- Modify apps/api/ (backend agent's domain)
-- Modify apps/admin/ (admin agent's domain)
-- Change API contracts (requires coordination)
+- Modify services/orders/ (orders agent's domain)
+- Modify services/auth/ (auth agent's domain)
+- Change API contracts sin coordinación
 
 ## Tech Stack
 
-- Next.js 14 (App Router)
-- TypeScript
-- Tailwind CSS
-- React Query for data fetching
-- Zod for validation
+- Go (stdlib net/http)
+- PostgreSQL con database/sql
+- Clean Architecture (domain/application/infrastructure/presentation)
+- go test + testify para tests
 
 ## Architecture
 ```
 
-apps/web/
-├── app/ # Next.js App Router
-├── components/ # React components
-├── hooks/ # Custom hooks
-├── lib/ # Utilities
-└── types/ # TypeScript types
+services/catalog/
+├── cmd/api/main.go
+├── internal/domain/
+├── internal/application/usecase/
+├── internal/infrastructure/persistence/
+└── internal/presentation/
 
 ```
 
 ## API Integration
 **Contract:** `docs/api-contracts/`
-- All API types defined there
-- Backend agent maintains contracts
-- I consume contracts, don't modify
+- Tipos y endpoints definidos en YAML
+- Este agente mantiene sus contratos
+- Consume contratos de otros servicios, no los modifica
 
 ## Focus Areas
-- User experience
-- Performance (< 1.5s FCP)
-- SEO optimization
-- Accessibility
-- Mobile responsiveness
+- Performance de queries (< 50ms p95)
+- Paginación en todos los listados
+- Datos correctamente validados
 
 ## Constitution
 Follows: `../../constitution.md`
@@ -2246,64 +2378,62 @@ Follows: `../../constitution.md`
 [Updated per feature being implemented]
 ```
 
-**Subagent 2: Backend (API)**
+**Subagent 2: Orders Service**
 
-`.claude/agents/api/CLAUDE.md`:
+`.claude/agents/orders/CLAUDE.md`:
 
 ```markdown
-# Backend API Subagent
+# Orders Service Subagent
 
 ## Domain Boundary
 
-**Scope:** apps/api/ directory ONLY
+**Scope:** services/orders/ directory ONLY
 
 **I can:**
 
-- Modify files in apps/api/
-- Read packages/shared for utilities
-- Modify docs/api-contracts/ (I own API contracts)
+- Modify files in services/orders/
+- Modify docs/api-contracts/orders.yaml (I own this contract)
+- Call Catalog service via HTTP (read-only)
 
 **I cannot:**
 
-- Modify frontend code
-- Change database schema without migration
+- Modify services/catalog/ (catalog agent's domain)
+- Change database schema without migration file
 - Deploy without tests passing
 
 ## Tech Stack
 
-- Express.js
-- TypeScript
-- Prisma ORM
-- PostgreSQL
-- Redis (caching)
-- BullMQ (jobs)
+- Go (stdlib net/http)
+- PostgreSQL con database/sql
+- Redis para distributed locks
+- Clean Architecture
 
 ## Architecture
 ```
 
-apps/api/
-├── routes/ # Express routes
-├── controllers/ # Request handlers
-├── services/ # Business logic
-├── models/ # Prisma models
-├── jobs/ # Background jobs
-└── middleware/ # Express middleware
+services/orders/
+├── cmd/api/main.go
+├── internal/domain/
+├── internal/application/usecase/
+├── internal/infrastructure/
+│   ├── persistence/   # Postgres repos
+│   └── http/          # HTTP clients (catalog service)
+└── internal/presentation/
 
 ```
 
 ## API Contract Management
-**I maintain:** `docs/api-contracts/`
+**I maintain:** `docs/api-contracts/orders.yaml`
 **When I change API:**
 1. Update contract first
-2. Notify frontend agent (add comment in contract)
+2. Notify dependent services (add comment in contract)
 3. Implement backend change
 4. Verify contract matches implementation
 
 ## Focus Areas
+- Consistencia de datos (transacciones)
+- Idempotencia en operaciones críticas
 - API performance (< 200ms p95)
-- Security (auth, validation, rate limiting)
-- Data integrity
-- Scalability
 
 ## Constitution
 Follows: `../../constitution.md`
@@ -2414,46 +2544,46 @@ _Respuesta esperada:_ "1) Comenta en el contract solicitando campo, 2) Backend a
 See: docs/api-contracts/search.yaml
 ```
 
-**Step 2: Backend Agent Session**
+**Step 2: Catalog Service Agent Session**
 
 ```bash
-cd apps/api
+cd services/catalog
 
 claude
 
-"BACKEND SUBAGENT SESSION
+"CATALOG SERVICE SUBAGENT SESSION
 
 Context:
 - Read ../../docs/specs/product-search.md
-- Read ../../.claude/agents/api/CLAUDE.md (my boundaries)
-- Focus: Backend implementation ONLY
+- Read ../../.claude/agents/catalog/CLAUDE.md (my boundaries)
+- Focus: Catalog service implementation ONLY
 
 Tasks:
 1. Design API contract (create ../../docs/api-contracts/search.yaml)
-2. Implement Elasticsearch integration
-3. Create POST /api/search endpoint
-4. Add tests
+2. Implement full-text search con PostgreSQL tsvector
+3. Create GET /api/products/search endpoint
+4. Add use case tests + integration tests
 5. Update API documentation
 
 Follow agentic workflow protocol.
 Begin."
 ```
 
-Backend agent trabaja en su dominio.
+Catalog agent trabaja en su dominio.
 
-**Step 3: Frontend Agent Session (paralelo)**
+**Step 3: Web Frontend Agent Session (paralelo)**
 
 ```bash
-cd apps/web
+cd web
 
 claude
 
 "WEB FRONTEND SUBAGENT SESSION
 
 Context:
-- Read ../../docs/specs/product-search.md
-- Read ../../docs/api-contracts/search.yaml (backend contract)
-- Read ../../.claude/agents/web/CLAUDE.md (my boundaries)
+- Read ../docs/specs/product-search.md
+- Read ../docs/api-contracts/search.yaml (catalog contract)
+- Read ../.claude/agents/web/CLAUDE.md (my boundaries)
 - Focus: Frontend implementation ONLY
 
 Tasks:
@@ -2463,7 +2593,7 @@ Tasks:
 4. Integrate with API (use contract as mock during development)
 5. Add tests
 
-Assume backend API works per contract.
+Assume catalog API works per contract.
 Use mock data for development.
 
 Begin."
@@ -2514,16 +2644,17 @@ Después de ambas sessions:
 git log --all --oneline --graph
 
 # Deberías ver dos branches:
-# - feature/search-backend (backend agent)
+# - feature/search-catalog (catalog agent)
 # - feature/search-frontend (frontend agent)
 
 # Merge ambos
 git checkout main
-git merge feature/search-backend
+git merge feature/search-catalog
 git merge feature/search-frontend
 
 # Run integration tests
-npm run test:integration
+make up
+go test -tags=integration ./...
 ```
 
 ---
@@ -2691,8 +2822,9 @@ Begin with Task 1.1"
 **Monitor cada 30 min:**
 
 ```bash
-/context  # Check token usage
+/context           # Check token usage
 git log --oneline  # Verify commits
+go test ./...      # Tests siguen pasando
 ```
 
 **Si contexto > 100k tokens:**
@@ -2713,11 +2845,11 @@ claude
 /review
 
 "Comprehensive code review:
-- Security issues
-- Performance problems
-- Constitution compliance
+- Security issues (SQL injection, auth bypass)
+- Go-specific issues (goroutine leaks, error ignoring)
+- Constitution compliance (dependency rule, naming)
 - Test coverage
-- Documentation
+- Documentation (godoc en exported symbols)
 
 Generate review report."
 ```
@@ -2742,11 +2874,12 @@ claude
 /deploy
 
 # Claude ejecuta checklist:
-# - Tests pass
-# - Build succeeds
-# - Env vars configured
-# - Migrations ready
-# - Monitoring configured
+# - go test ./... pasa
+# - go build ./... compila
+# - golangci-lint run sin warnings
+# - Env vars configuradas
+# - Migrations listas
+# - Monitoring configurado
 ```
 
 ## Token Budget
@@ -2777,13 +2910,14 @@ claude
 
 After completing:
 
-- [ ] All tests pass (>80% coverage)
-- [ ] No linting errors
-- [ ] Constitution compliant
+- [ ] `go test ./...` pasa (>80% coverage en use cases)
+- [ ] `golangci-lint run` sin errores
+- [ ] `go build ./...` compila
+- [ ] Constitution compliant (dependency rule respetada)
 - [ ] Spec fully implemented
-- [ ] Documentation complete
+- [ ] Godoc en todos los exported symbols
 - [ ] Ready for code review
-- [ ] Deployable
+- [ ] Deployable (migrations versionadas, env vars documentadas)
 ````
 
 **Usar template:**
@@ -2835,10 +2969,11 @@ claude
 
 ```bash
 # Add to .claudeignore:
-node_modules/
-dist/
+vendor/
+bin/
 *.log
-coverage/
+coverage.out
+coverage.html
 ```
 
 1. **Nuclear option:**
@@ -3155,9 +3290,9 @@ Report:
 
 ```bash
 # Claude generates gap report:
-# - Missing: Password reset email (req 3.2)
-# - Extra: Social login (not in spec)
-# - Deviation: Using bcrypt vs argon2
+# - Missing: Rate limiting en POST /forgot-password (req 3.2)
+# - Extra: Admin endpoint para reset manual (not in spec)
+# - Deviation: Token expiry 2h en vez de 1h especificada
 ```
 
 1. **Prioritize:**
@@ -3220,7 +3355,7 @@ claude
 
 1. **Apply all optimizations:**
 
-- [ ] .claudeignore comprehensive
+- [ ] .claudeignore comprehensive (vendor/, bin/, coverage.out)
 - [ ] CLAUDE.md < 200 tokens
 - [ ] /clear between features
 - [ ] /compact long sessions
@@ -3258,7 +3393,7 @@ Task 1 → Task 2 → Task 3 → commit all
 # Use Opus only for:
 # - Architecture decisions
 # - Complex debugging
-# - Critical logic
+# - Critical logic (concurrency, security)
 ```
 
 **Target costs:**
@@ -3274,8 +3409,8 @@ If above target, optimize more aggressively.
 
 **Ejercicio:** Tienes estos síntomas:
 
-1. Claude genera código que no usa tu ORM preferido (Prisma)
-2. Naming conventions incorrectas
+1. Claude genera código que usa GORM en vez de `database/sql` directo
+2. Naming conventions incorrectas (camelCase en nombres de archivo)
 3. Tests no incluidos
 
 ¿Qué problema es? ¿Cómo lo arreglas?
@@ -3287,4 +3422,4 @@ _Respuesta:_
 
 ---
 
-¿Listo para implementar todo? ¿Algún día específico necesitas que profundice más? También puedo ayudarte con integración específica para tu setup de Neovim + Arch Linux si quieres.
+¿Listo para implementar todo? ¿Algún día específico necesitas que profundice más? También puedo ayudarte con integración específica para tu stack de Go si quieres.
