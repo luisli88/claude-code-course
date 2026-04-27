@@ -920,7 +920,7 @@ Tienes 3 niveles de configuración con distinta precedencia:
 
 ```
 ┌─────────────────────────────────┐
-│  ~/.claude.md (GLOBAL)          │  ← Tus preferencias personales
+│  ~/.claude/CLAUDE.md (GLOBAL)   │  ← Tus preferencias personales
 │  "En TODO proyecto yo..."       │     (Neovim, Arch Linux, español)
 └─────────────────────────────────┘
             ↓ overrides

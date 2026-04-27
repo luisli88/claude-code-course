@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+> This project overrides the default backend stack from constitution. See stack section below.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project
